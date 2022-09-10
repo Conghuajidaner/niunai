@@ -69,20 +69,17 @@ bool NiuNai<T>::init_()
          return false;
     }
 
-    address_ = (T*)(address_head + 2 * sizeof(std::atomic<uint64_t>));
+    address_ = (T*)(address_head + sizeof(MetaInfo));
 
-    if (flag_exist) {
-        begin_ = (std::atomic<uint64_t>*);
-        end_ =  (std::atomic<uint64_t>*) + 1;
-    } else {
-        begin_ = (std::atomic<uint64_t>*);
-        end_ =  (std::atomic<uint64_t>*) + 1;
-        begin_->store(0U);
-        end_->store(0U);
+    if (!flag_exist) {
+        meta_.begin.store(0U);
+        meta_.end.store(0U);
+        meta_.element_num_.store(0U);
     }
 
+    // 初始化所有的flag位置为northing
     for (size_t idx = 0U; idx < buffer_size; ++ idx) {
-        auto flag = static_cast<std::atomic<uint8_t>> address_ + idx * (sizeof(T) + sizeof(std::atomic<uint8_t>));
+        auto flag = static_cast<std::atomic<uint8_t>> ((void*)address_ + idx * sizeof(MetaInfo));
         *flag = NORTHING;
     }
     return true;
@@ -98,4 +95,33 @@ template<class T>
 T Niunai<T>::pop_front()
 {
     
+}
+
+template<class T>
+T Niunai<T>::front()
+{
+
+}
+
+template<class T>
+void Niunai<T>::push(const T&t)
+{
+    auto idx = meta_.end_.fetch_add();
+    meta_.element_.fetch_add();
+
+    auto flag = address_ + 
+}
+
+
+/**
+ * @brief 安全但是并不可靠，后面估计会删掉
+ * 
+ * @tparam T tyepe
+ * @return true element_num_ == 0
+ * @return false element_num_ != 0
+ */
+template<class T>
+bool Niunai<T>::is_empty()
+{
+    return meta_.element_num_.load() == 0;
 }

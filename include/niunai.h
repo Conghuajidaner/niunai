@@ -17,6 +17,12 @@ uint8_t READFINISH = 1 << 2;
 uint8_t WRITING = 1 << 3;
 uint8_t WRITEFINISH = 1 << 4;
 
+struct MetaInfo {
+    std::atomic<uint16_t> element_num_;
+    std::atomic<uint64_t> begin_;
+    std::atomic<uint64_t> end_;
+}
+
 template<class T>
 class NiuNai
 {
@@ -26,10 +32,9 @@ private:
     void deinit_();
 
 private:
-    std::atomic<uint64_t>* begin_;
-    std::atomic<uint64_t>* end_;
     T* address_;
-
+    MetaInfo* meta_;
+    int fd_;
     std::string buffer_name_;
     size_t buffer_size_;
     bool master_;
