@@ -11,6 +11,10 @@
 #include <string>
 
 
+#define PATH "/dev/shm/"
+#define FLAG "_flag"
+#define DEFAULT "test"
+
 uint8_t NORTHING = 1 << 0;
 uint8_t READING = 1 << 1;
 uint8_t READFINISH = 1 << 2;
@@ -21,7 +25,7 @@ struct MetaInfo {
     std::atomic<uint16_t> element_num_;
     std::atomic<uint64_t> begin_;
     std::atomic<uint64_t> end_;
-}
+};
 
 template<class T>
 class NiuNai
@@ -34,9 +38,11 @@ private:
 private:
     T* address_;
     MetaInfo* meta_;
+    
     int fd_;
     std::string buffer_name_;
     size_t buffer_size_;
+    size_t element_size;
     bool master_;
 public:
     NiuNai() = delete;
@@ -48,6 +54,8 @@ public:
     T front();
     void push(const T&);
     bool is_empty();
+    void write_flagfile();
+    uint64_t element_num();
 };
 
 #endif //NIUNAI_H_
