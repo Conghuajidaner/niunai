@@ -1,61 +1,78 @@
-/**
- * @copyright  
- * 
- * @brief head file
- * @author yaokun Zhai (zhaiyaokun@lixiang.com)
- * @date 2022-08-30
- */
-#ifndef NIUNAI_H_
-#define NIUNAI_H_
+#ifndef BUFFER_H_
+#define BUFFER_H_
 
+#include <atomic>
 #include <string>
+#include <tuple>
 
+#include <stdio.h>
+#include <unistd.h>
 
-#define PATH "/dev/shm/"
-#define FLAG "_flag"
-#define DEFAULT "test"
+#include <fcntl.h>
 
-uint8_t NORTHING = 1 << 0;
-uint8_t READING = 1 << 1;
-uint8_t READFINISH = 1 << 2;
-uint8_t WRITING = 1 << 3;
-uint8_t WRITEFINISH = 1 << 4;
+#include <sys/mman.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
 
-struct MetaInfo {
-    std::atomic<uint16_t> element_num_;
-    std::atomic<uint64_t> begin_;
-    std::atomic<uint64_t> end_;
+using index_t = size_t;
+using pointer = void *;
+using offset = long long;
+
+#define BASE_PATH "/dev/shm/"
+
+struct alignas(8) test_data
+{
+    /* data */
 };
 
-template<class T>
-class NiuNai
+struct alignas(8) META_INFO
+{
+    std::atomic<index_t> write_idx;
+    std::atomic<index_t> read_idx;
+    std::atomic<uint64_t> flag;
+};
+
+struct alignas(8) VEC_STAT_ADDRESS
+{
+    std::atomic<index_t> stat;
+    offset offset_;
+};
+
+class shm
 {
 private:
-    /* data */
-    bool init_();
-    void deinit_();
+    META_INFO* meta_info;
+    pointer head_address;
+    pointer stat_address;
+    pointer data_address;
+    pointer tail_address;
 
-private:
-    T* address_;
-    MetaInfo* meta_;
-    
+    size_t capacity;
+    size_t mask;
+    std::string buffer_name;
     int fd_;
-    std::string buffer_name_;
-    size_t buffer_size_;
-    size_t element_size;
-    bool master_;
 public:
-    NiuNai() = delete;
-    NiuNai(std::string name = DEFAULT, bool master = false, size_t buffer_size = 8192);
-    ~NiuNai();
+    shm(size_t _capacity, std::string _buffer_name);
+    ~shm();
 
-public:
-    T pop_front();
-    T front();
-    void push(const T&);
-    bool is_empty();
-    void write_flagfile();
-    uint64_t element_num();
+    bool init();
+    bool deinit();
+
+    index_t get_write_idx();
+    void commit_write(index_t idx);
+    std::tuple<bool, offset> get_writeable(index_t idx);
+    
+    index_t get_read_idx();
+    std::tuple<bool, offset> get_readable(index_t idx);
+    void commit_read(index_t idx);
+    std::tuple<bool, offset> get_readable_wait(index_t idx, int timeout_ms);
+
+    void pop();
+    bool empty();
+    bool full();
+    size_t size();
+    
+    pointer get_base_address() const;
 };
 
-#endif //NIUNAI_H_
+#endif // BUFFER_H_

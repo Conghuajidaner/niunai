@@ -1,192 +1,148 @@
-/**
- * @copyright 
- * 
- * @brief 
- * @author yaokun Zhai (zhaiyaokun@lixiang.com)
- * @date 2022-08-30
- */
+#include "shm_ring_buffer.h"
 
-#include <atomic>
-#include <filesystem>
-#include <fstream>
-#include <fcntl.h>
+#include <chrono>
+#include <thread>
 
-#include <stdio.h>
-
-#include <sys/shm.h>
-#include <sys/mman.h>
-
-#include "../include/niunai.h"
-
-
-template<class T>
-NiuNai<T>::NiuNai(std::string name, bool master, size_t buffer_size)
+shm::shm(size_t _capacity, std::string _buffer_name): capacity(_capacity), buffer_name(_buffer_name)
 {
-    buffer_name_ = name;
-    buffer_size_ = buffer_size;
-    master_ = master;
-    init_();
+    mask = capacity - 1;
+    init();
 }
 
-template<class T>
-NiuNai<T>::~NiuNai()
+shm::~shm()
 {
-    deinit_();
+    deinit();
 }
 
-template<class T>
-bool NiuNai<T>::init_()
+bool shm::init()
 {
-    // 判断是否第一次创建共享内存
-    const bool flag_exist = std::filesystem::exists(std::filesystem::path(DEFAULT+buffer_name_));
-    
-    auto fd = shm_open(buffer_name_.c_str(),  O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-    if (fd < 0) {
-        printf("shm_open error code:%d\n", errno);
+    fd_ = shm_open(buffer_name.c_str(), O_CREAT | O_RDWR, S_IRGRP | S_IWGRP | S_IRUSR | S_IWUSR | S_IWOTH | S_IROTH);
+    if (fd_ == -1)
+    {
+        printf("shm_open errno code: %d", errno);
         return false;
     }
 
-    // 只有master 节点对buffer 进行初始化
-    if (master_) {
-        auto ret = ftruncate(fd, 2 * sizeof(std::atomic<uint64_t>) + buffer_size_ * (sizeof(T) + sizeof(std::atomic<uint8_t>)));
-        if (ret < 0) {
-            printf("ftruncate error code:%d\n", errno);
-            return false;
-        }
-    }
-
-    struct stat shm_file;
-    auto ret = stat(PATH+buffer_name_, &shm_file);
+    const size_t BUFFER_SIZE = sizeof(META_INFO) + capacity * (sizeof(VEC_STAT_ADDRESS) + sizeof(test_data));
+    auto ret = ftruncate(fd_, BUFFER_SIZE);
     if (ret < 0)
     {
-         printf("shm_file open error code:%d\n", errno);
-         return false;
+        printf("ftruncate error code%d:\n", errno);
+        return false;
     }
 
-    auto address_head = mmap(nullptr, shm_file.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (address_head == nullptr) {
-         printf("mmap error code:%d\n", errno);
-         return false;
+    head_address = mmap(nullptr, BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+    if (head_address == MAP_FAILED)
+    {
+        printf("mmap errno code%d:\n", errno);
+        return false;
     }
+    tail_address = head_address + BUFFER_SIZE;
+    stat_address = head_address + sizeof(META_INFO);
+    data_address = stat_address + capacity * sizeof(VEC_STAT_ADDRESS);
+    meta_info =  static_cast<META_INFO*>(head_address);
 
-    address_ = (T*)(address_head + sizeof(MetaInfo));
+    if (meta_info->flag.load() != 2333333)
+    {
+        printf("init value\n");
+        meta_info->read_idx.store(0U);
+        meta_info->write_idx.store(0U);
+        meta_info->flag.store(2333333U);
 
-    if (!flag_exist) {
-        meta_->begin_.store(0U);
-        meta_->end_.store(0U);
-        meta_->element_num_.store(0U);
-    }
-
-    element_size = sizeof(std::atomic<uint8_t>) + sizeof(T);
-
-    // 初始化所有的flag位置为northing
-    for (size_t idx = 0U; idx < buffer_size; ++ idx) {
-        auto flag = static_cast<std::atomic<uint8_t*>> ((void*)address_ + idx * element_size);
-        *flag = NORTHING;
+        for (size_t idx = 0U; idx < capacity; ++idx)
+        {
+            auto status = static_cast<VEC_STAT_ADDRESS *>(stat_address + idx * sizeof(VEC_STAT_ADDRESS));
+            status->stat.store(idx);
+            status->offset_ = idx * sizeof(test_data);
+        }
     }
     return true;
 }
 
-template<class T>
-void Niunai<T>::deinit_()
+bool shm::deinit()
 {
-    
+    // northing to do
+    return true;
 }
 
-template<class T>
-T Niunai<T>::pop_front()
+index_t shm::get_write_idx()
 {
-    T ret;
-    auto idx = meta->begin_.fetch_add();
-    meta_->element_.fetch_sub();
-    idx %= buffer_size_;
+    return meta_info->write_idx.fetch_add(1U, std::memory_order_relaxed);
+}
+
+void shm::commit_write(index_t idx)
+{
+    auto status = static_cast<VEC_STAT_ADDRESS*>(stat_address + (idx & mask) * sizeof(VEC_STAT_ADDRESS));
+    status->stat.store(static_cast<index_t>(~idx), std::memory_order_release);
+    // printf("status->stat.load: %zu", status->stat.load());
+}
+
+std::tuple<bool, offset> shm::get_writeable(index_t idx)
+{
+    auto status = static_cast<VEC_STAT_ADDRESS *>(stat_address + (idx & mask) * sizeof(VEC_STAT_ADDRESS));
+    if (status->stat.load() != idx) return {false, 0};
+    return {true, status->offset_};
+}
+
+index_t shm::get_read_idx()
+{
+    return meta_info->read_idx.fetch_add(1U, std::memory_order_relaxed);
+}
+
+std::tuple<bool, offset> shm::get_readable(index_t idx)
+{
+    auto status = static_cast<VEC_STAT_ADDRESS *>(stat_address + (idx & mask) * sizeof(VEC_STAT_ADDRESS));
+    if (status->stat.load() != ~idx)
     {
-        auto flag = static_cast<std::atomic<uint8_t*>> ((void*)address_ + idx * element_size);
-        while ((*flag).store() != WRITING);
-        memcpy((T*)(flag + 1), &T, sizeof(T));
-        (*flag).store() != READFINISH;
+        return {false, 0};
     }
+    return {true, status->offset_};
 }
 
-template<class T>
-T Niunai<T>::front()
+void shm::commit_read(index_t idx)
 {
-    T ret;
-    auto idx = meta->begin_.load();
+    auto status = static_cast<VEC_STAT_ADDRESS *>(stat_address + (idx & mask) * sizeof(VEC_STAT_ADDRESS));
+    status->stat.store(static_cast<index_t>(idx + capacity), std::memory_order_release);
+}
 
-    meta_->element_.fetch_sub();
-    idx %= buffer_size_;
-    {
-        auto flag = static_cast<std::atomic<uint8_t*>> ((void*)address_ + idx * element_size);
-        while ((*flag).store() != WRITING);
-        memcpy((T*)(flag + 1), &T, sizeof(T));
-        (*flag).store() != READFINISH;
+std::tuple<bool, offset> shm::get_readable_wait(index_t idx, int timeout_ms)
+{
+    auto ret = get_readable(idx);
+    if (!std::get<0>(ret)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+        ret = get_readable(idx);
     }
     return ret;
 }
 
-template<class T>
-void Niunai<T>::write_flagfile()
+void shm::pop()
 {
-    if (meta_->element_num_ % 4000 == 0)
-    {
-        try {
-            std::fstream op;
-            op.open(PATH + buffer_name_ + FLAG);
-            if (!op.is_open()) {
-                printf("flag file open error!\n");
-                return;
-            }
-            op << "1";
-            op.close();
-        } catch(e) {
-            printf("%s", e.what());
-        }
-    }
-    return ;
+    const int64_t idx = static_cast<int64_t>(get_read_idx());
+    commit_read(static_cast<uint64_t>(idx));
+    printf("pop: %d\n", idx);
 }
 
-
-
-template<class T>
-void Niunai<T>::push(const T&t)
+bool shm::empty()
 {
-    auto idx = meta_->end_.fetch_add();
-    meta_->element_.fetch_add();
-    idx %= buffer_size_;
-
-    {
-        auto flag = static_cast<std::atomic<uint8_t>> ((void*)address_ + idx * element_size);
-        while ((*flag).store() != READING);
-        memcpy((T*)(flag + 1), &T, sizeof(T));
-        (*flag).store() != WRITEFINISH;
-    }
-
-    if (meta_->element_num_.load() >= buffer_size_) {
-        meta_->element_num_.store(buffer_size_);
-        meta_->begin_.store(meta_.end_.load() + 1);
-    }
-
-    write_flagfile();
-    return ;
+    return size() <= 0;
 }
 
-
-/**
- * @brief 安全但是并不可靠，后面估计会删掉
- * 
- * @tparam T tyepe
- * @return true element_num_ == 0
- * @return false element_num_ != 0
- */
-template<class T>
-bool Niunai<T>::is_empty()
+bool shm::full()
 {
-    return meta_->element_num_.load() == 0;
+    return size() >= capacity;
 }
 
-template<class T>
-uint64_t Niunai<T>::element_num()
+size_t shm::size()
 {
-    return meta_->element_num_;
+    auto w_id = meta_info->write_idx.load(std::memory_order_relaxed);
+    auto r_id = meta_info->read_idx.load(std::memory_order_relaxed);
+    if (w_id < r_id) {
+      return 0;
+    }
+    return w_id - r_id;
+}
+
+pointer shm::get_base_address() const
+{
+    return data_address;   
 }
